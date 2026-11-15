@@ -181,7 +181,7 @@ void TcpConnection::close() {
 
 void TcpConnection::abort() {
     if (state_ == TcpState::closed) return;
-    if (state_ != TcpState::syn_sent && state_ != TcpState::time_wait) emit(snd_nxt_, wire::kRst | wire::kAck);
+    if (state_ != TcpState::syn_sent && state_ != TcpState::time_wait) emit(snd_max_, wire::kRst | wire::kAck);
     finish("aborted");
 }
 
@@ -235,6 +235,7 @@ void TcpConnection::on_segment(const wire::Tcp& h, Bytes payload) {
         if (!(h.flags & wire::kRst)) send_ack();
         return;
     }
+    bool probe = window_closed_but_valid && !payload.empty();  // a zero-window probe: answer with our window
     if (window_closed_but_valid) payload = {};
 
     // Trim what we already have from the front and what doesn't fit the window from the back.
@@ -337,7 +338,7 @@ void TcpConnection::on_segment(const wire::Tcp& h, Bytes payload) {
         if (fin_at > rcv_nxt_) ooo_fin_ = fin_at;  // arrives before the data it follows
         acked_something = true;
     }
-    if (acked_something) send_ack();  // every data segment is acknowledged at once (no delayed ACKs)
+    if (acked_something || probe) send_ack();  // every data segment is acknowledged at once (no delayed ACKs)
 }
 
 void TcpConnection::on_syn_sent(const wire::Tcp& h) {
@@ -394,6 +395,7 @@ bool TcpConnection::on_ack(const wire::Tcp& h, std::int64_t seq, bool has_payloa
         return false;
     }
     std::uint64_t new_wnd = std::uint64_t{h.window} << snd_wscale_;
+    std::uint64_t old_wnd = snd_wnd_;
     if (ack >= snd_una_) {
         // Window update rule (§3.10.7.4): only from a newer segment, so reordered old ones can't shrink it.
         auto useq = static_cast<std::uint64_t>(seq);
@@ -402,6 +404,11 @@ bool TcpConnection::on_ack(const wire::Tcp& h, std::int64_t seq, bool has_payloa
             wl1_ = useq;
             wl2_ = ack;
         }
+    }
+    bool window_opened = old_wnd == 0 && snd_wnd_ > 0;
+    if (window_opened) {  // stop probing; sending resumes below even if this ACK acknowledges nothing new
+        stack_.timers().cancel(persist_timer_);
+        persist_backoff_ = 0;
     }
     if (ack > snd_una_) {
         std::uint64_t acked = ack - snd_una_;
@@ -416,8 +423,21 @@ bool TcpConnection::on_ack(const wire::Tcp& h, std::int64_t seq, bool has_payloa
         }
         snd_una_ = ack;
         if (snd_nxt_ < snd_una_) snd_nxt_ = snd_una_;
-        // Congestion control (RFC 5681 §3.1): slow start, then congestion avoidance.
-        if (cwnd_ < ssthresh_) {
+        if (in_recovery_) {
+            if (ack >= recover_) {
+                // Full ACK (RFC 6582 §3.2 step 3): everything outstanding at the loss is acknowledged.
+                cwnd_ = std::min(ssthresh_, snd_max_ - snd_una_ + mss_);
+                in_recovery_ = false;
+            } else {
+                // Partial ACK: the next hole is lost too. Retransmit it now instead of waiting for the
+                // RTO, and deflate the window by what was acknowledged (RFC 6582 §3.2 step 4).
+                retransmit_head();
+                cwnd_ = cwnd_ > acked ? cwnd_ - acked : 0;
+                if (acked >= mss_) cwnd_ += mss_;
+                cwnd_ = std::max<std::uint64_t>(cwnd_, mss_);
+            }
+        } else if (cwnd_ < ssthresh_) {
+            // Congestion control (RFC 5681 §3.1): slow start, then congestion avoidance.
             cwnd_ += std::min<std::uint64_t>(acked, mss_);
         } else {
             cwnd_ += std::max<std::uint64_t>(1, std::uint64_t{mss_} * mss_ / cwnd_);
@@ -431,11 +451,44 @@ bool TcpConnection::on_ack(const wire::Tcp& h, std::int64_t seq, bool has_payloa
         }
         try_send();
         if (on_writable && sndbuf_.space() > 0 && state_ != TcpState::closed) on_writable();
-    } else if (ack == snd_una_ && !has_payload && new_wnd == snd_wnd_ && snd_max_ > snd_una_) {
+    } else if (window_opened) {
+        try_send();  // a pure window update: nothing was acknowledged, but now there is room
+    } else if (ack == snd_una_ && !has_payload && new_wnd == old_wnd && snd_max_ > snd_una_) {
         ++dupacks_;  // RFC 5681 §2: same ACK, no data, same window, data outstanding
         ++stats_.dup_acks;
+        if (cfg_.fast_retransmit) {
+            if (dupacks_ == 3 && !in_recovery_ && snd_una_ >= recover_) {
+                // Fast retransmit (RFC 5681 §3.2): three duplicates mean a lost segment, not reordering.
+                // The snd_una_ >= recover_ check keeps one loss episode from triggering it twice (RFC 6582).
+                ssthresh_ = std::max<std::uint64_t>((snd_max_ - snd_una_) / 2, 2 * std::uint64_t{mss_});
+                recover_ = snd_max_;
+                in_recovery_ = true;
+                ++stats_.fast_retransmits;
+                rtt_timing_ = false;  // Karn
+                retransmit_head();
+                cwnd_ = ssthresh_ + 3 * std::uint64_t{mss_};  // the three segments that left the network
+            } else if (in_recovery_) {
+                cwnd_ += mss_;  // each further duplicate means another segment left: send a new one
+                try_send();
+            }
+        }
     }
     return state_ != TcpState::closed;
+}
+
+// retransmit_head resends the first unacknowledged segment (or the FIN) without moving snd_nxt_.
+void TcpConnection::retransmit_head() {
+    std::uint64_t end = data_end();
+    if (snd_una_ < end) {
+        auto len = static_cast<std::size_t>(std::min<std::uint64_t>(mss_, end - snd_una_));
+        Buffer seg(len);
+        sndbuf_.copy_out(static_cast<std::size_t>(snd_una_ - data_base_), seg);
+        emit(snd_una_, wire::kAck, seg);
+        ++stats_.retransmits;
+    } else if (fin_seq_ && snd_una_ == *fin_seq_) {
+        emit(*fin_seq_, wire::kFin | wire::kAck);
+        ++stats_.retransmits;
+    }
 }
 
 void TcpConnection::on_data_in(std::int64_t seq, Bytes payload) {
@@ -501,7 +554,11 @@ void TcpConnection::try_send() {
         std::uint64_t end = data_end();
         if (snd_nxt_ < end) {
             std::uint64_t limit = snd_una_ + std::min(cwnd_, snd_wnd_);
-            if (snd_nxt_ >= limit) break;  // window full
+            if (snd_nxt_ >= limit) {
+                // Zero window with nothing in flight: no ACK will come to reopen it, so probe (§3.8.6.1).
+                if (snd_wnd_ == 0 && snd_una_ == snd_max_) arm_persist();
+                break;
+            }
             auto len = static_cast<std::size_t>(std::min({std::uint64_t{mss_}, end - snd_nxt_, limit - snd_nxt_}));
             Buffer seg(len);
             sndbuf_.copy_out(static_cast<std::size_t>(snd_nxt_ - data_base_), seg);
@@ -555,7 +612,7 @@ void TcpConnection::on_rto() {
     bool handshake = state_ == TcpState::syn_sent || state_ == TcpState::syn_received;
     if (!handshake && snd_una_ >= snd_max_) return;  // nothing outstanding
     if (++backoff_ > cfg_.max_retransmits) {
-        if (!handshake) emit(snd_nxt_, wire::kRst | wire::kAck);
+        if (!handshake) emit(snd_max_, wire::kRst | wire::kAck);
         finish("timeout");
         return;
     }
@@ -583,6 +640,34 @@ void TcpConnection::on_rto() {
     }
     snd_nxt_ = snd_una_;  // go back and resend from the first unacknowledged byte
     try_send();
+}
+
+void TcpConnection::arm_persist() {
+    if (persist_timer_ != 0) return;
+    Duration wait = std::min(rto_ * (1 << std::min(persist_backoff_, 10)), cfg_.rto_max);
+    persist_timer_ = stack_.timers().schedule(stack_.clock().now() + wait, [w = weak_from_this()] {
+        if (auto c = w.lock()) {
+            c->persist_timer_ = 0;
+            c->on_persist();
+        }
+    });
+}
+
+void TcpConnection::on_persist() {
+    if (snd_wnd_ > 0) {
+        persist_backoff_ = 0;
+        try_send();
+        return;
+    }
+    if (snd_nxt_ < data_end()) {
+        // One byte past the closed window; the receiver drops it but must answer with its window.
+        Buffer one(1);
+        sndbuf_.copy_out(static_cast<std::size_t>(snd_nxt_ - data_base_), one);
+        emit(snd_nxt_, wire::kAck, one);
+        ++stats_.window_probes;
+    }
+    ++persist_backoff_;
+    arm_persist();
 }
 
 void TcpConnection::update_rto(Duration r) {

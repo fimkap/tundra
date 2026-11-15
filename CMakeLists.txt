@@ -38,6 +38,7 @@ if(TUNDRA_BUILD_TESTS)
   add_executable(tundra_tests
     tests/checksum_test.cpp
     tests/stack_test.cpp
+    tests/sim_property_test.cpp
     tests/tcp_test.cpp
     tests/timers_test.cpp
     tests/wire_test.cpp

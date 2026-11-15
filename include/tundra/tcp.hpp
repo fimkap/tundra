@@ -47,6 +47,7 @@ struct TcpConfig {
     Duration msl = 30s;           // TIME-WAIT lasts 2 * msl
     int max_retransmits = 8;      // consecutive timeouts before giving up
     bool window_scaling = true;   // RFC 7323
+    bool fast_retransmit = true;  // RFC 5681 fast retransmit + RFC 6582 NewReno recovery
 };
 
 struct TcpStats {
@@ -54,6 +55,7 @@ struct TcpStats {
     std::uint64_t bytes_in = 0, bytes_out = 0;  // payload, first transmissions only for bytes_out
     std::uint64_t retransmits = 0;              // segments sent again
     std::uint64_t timeouts = 0, fast_retransmits = 0, dup_acks = 0, out_of_order = 0;
+    std::uint64_t window_probes = 0;
 };
 
 struct FourTuple {
@@ -137,8 +139,15 @@ private:
     void deliver(Bytes data);
 
     void try_send();
+    void retransmit_head();
+    void arm_persist();
+    void on_persist();
     void emit(std::uint64_t seq, std::uint8_t flags, Bytes payload = {});
-    void send_ack() { emit(snd_nxt_, wire::kAck); }
+    // Pure ACKs (and RSTs) carry snd_max_, the next unsent byte, not snd_nxt_: after a timeout snd_nxt_
+    // is rewound for retransmission, and an ACK carrying that old sequence number looks like an old
+    // duplicate to a peer that already has the data. The peer then answers with an ACK it doesn't
+    // process, and the two ends trade ACKs forever. BSD's tcp_output has the same rule.
+    void send_ack() { emit(snd_max_, wire::kAck); }
     std::uint32_t advertised_window() const;
     std::uint64_t data_end() const { return data_base_ + sndbuf_.size(); }
 
@@ -189,6 +198,7 @@ private:
     bool have_srtt_ = false;
     Duration srtt_{}, rttvar_{}, rto_;
     int backoff_ = 0;
+    int persist_backoff_ = 0;
 
     TimerQueue::Id rto_timer_ = 0, persist_timer_ = 0, time_wait_timer_ = 0;
 };

@@ -174,9 +174,13 @@ struct Net {
     ManualClock clock;
     SimNetwork sim;
     std::unique_ptr<Stack> client, server;
+    SimNetwork::Port* client_port = nullptr;  // frames the client sends
+    SimNetwork::Port* server_port = nullptr;
 
     Net(LinkParams params, std::uint64_t seed, TcpConfig tcp = {}) : sim(clock, seed) {
         auto [a, b] = sim.connect(LinkType::ethernet, params, params);
+        client_port = a;
+        server_port = b;
         StackConfig cc, sc;
         cc.ip = kPeerIp, cc.mac = kPeerMac, cc.tcp = tcp, cc.seed = seed;
         sc.ip = kStackIp, sc.mac = kStackMac, sc.tcp = tcp, sc.seed = seed + 1;
@@ -295,6 +299,85 @@ TEST(Sim, SimultaneousClose) {
     ASSERT_TRUE(n.sim.run([&] { return e.closed && !server_reason.empty(); }, 30s));
     EXPECT_EQ(e.reason, "closed");
     EXPECT_EQ(server_reason, "closed");
+}
+
+}  // namespace
+}  // namespace tundra::test
+
+
+namespace tundra::test {
+namespace {
+
+// is_data_segment reports whether an Ethernet frame carries TCP payload.
+bool is_data_segment(Bytes frame) {
+    auto ip = wire::parse_ipv4(frame.subspan(wire::kEthernetSize));
+    if (!ip || ip->protocol != wire::kProtoTcp) return false;
+    Bytes seg = frame.subspan(wire::kEthernetSize + ip->header_size, ip->total_length - ip->header_size);
+    auto h = wire::parse_tcp(seg, ip->src, ip->dst);
+    return h && seg.size() > h->header_size;
+}
+
+// One lost segment in a large window: three duplicate ACKs trigger a fast retransmit, and the transfer
+// never waits for the retransmission timer.
+TEST(Sim, FastRetransmitRecoversWithoutTimeout) {
+    Net n({.delay = 20ms}, 6, short_msl());
+    serve_echo(*n.server, 7);
+    int data_segments = 0;
+    n.client_port->drop = [&](Bytes f) { return is_data_segment(f) && ++data_segments == 20; };
+    EchoClient e;
+    e.start(*n.client, kStackIp, 7, random_bytes(400'000, 6));
+    ASSERT_TRUE(n.sim.run([&] { return e.closed; }, 120s));
+    EXPECT_EQ(e.received, e.sent);
+    EXPECT_EQ(e.c->stats().fast_retransmits, 1u);
+    EXPECT_EQ(e.c->stats().timeouts, 0u);
+}
+
+// The same loss with fast retransmit turned off can only be repaired by the timer.
+TEST(Sim, WithoutFastRetransmitTheTimerRepairsIt) {
+    TcpConfig t = short_msl();
+    t.fast_retransmit = false;
+    Net n({.delay = 20ms}, 6, t);
+    serve_echo(*n.server, 7);
+    int data_segments = 0;
+    n.client_port->drop = [&](Bytes f) { return is_data_segment(f) && ++data_segments == 20; };
+    EchoClient e;
+    e.start(*n.client, kStackIp, 7, random_bytes(400'000, 6));
+    ASSERT_TRUE(n.sim.run([&] { return e.closed; }, 120s));
+    EXPECT_EQ(e.received, e.sent);
+    EXPECT_EQ(e.c->stats().fast_retransmits, 0u);
+    EXPECT_GE(e.c->stats().timeouts, 1u);
+}
+
+// A receiver that stops reading closes its window; the sender probes it and resumes when it reopens.
+TEST(Sim, ZeroWindowIsProbedAndReopens) {
+    TcpConfig t = short_msl();
+    t.recv_buffer = 16 * 1024;
+    Net n({.delay = 5ms}, 7, t);
+    std::shared_ptr<TcpConnection> srv;
+    Buffer got;
+    n.server->tcp_listen(9, [&](std::shared_ptr<TcpConnection> c) {
+        srv = c;
+        c->pause_reading();
+        c->on_data = [&](Bytes d) { got.insert(got.end(), d.begin(), d.end()); };
+    });
+    auto data = random_bytes(100'000, 7);
+    auto c = n.client->tcp_connect(kStackIp, 9);
+    std::size_t off = 0;
+    auto pump = [&] {
+        while (off < data.size()) {
+            std::size_t k = c->send(Bytes(data).subspan(off));
+            if (k == 0) break;
+            off += k;
+        }
+    };
+    c->on_connected = pump;
+    c->on_writable = pump;
+    n.sim.run([] { return false; }, 30s);  // the window closes and stays closed
+    EXPECT_TRUE(got.empty());
+    EXPECT_GE(c->stats().window_probes, 2u);
+    srv->resume_reading();
+    ASSERT_TRUE(n.sim.run([&] { return got.size() == data.size(); }, 120s));
+    EXPECT_EQ(got, data);
 }
 
 }  // namespace

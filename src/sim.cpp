@@ -30,7 +30,7 @@ void SimNetwork::send(Port* from, Bytes frame) {
     ++from->sent;
     const LinkParams& p = from->params_;
     std::uniform_real_distribution<double> u(0, 1);
-    if (p.loss > 0 && u(rng_) < p.loss) {
+    if ((from->drop && from->drop(frame)) || (p.loss > 0 && u(rng_) < p.loss)) {
         ++from->dropped;
         return;
     }

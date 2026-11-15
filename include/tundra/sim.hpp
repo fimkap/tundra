@@ -32,6 +32,8 @@ public:
         LinkType link_type() const override { return type_; }
         void transmit(Bytes frame) override;
         std::uint64_t sent = 0, dropped = 0, duplicated = 0;
+        // drop, if set, sees every frame this port sends and returns true to lose it (deterministic loss).
+        std::function<bool(Bytes)> drop;
 
     private:
         friend class SimNetwork;
