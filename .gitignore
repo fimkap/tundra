@@ -1,0 +1,10 @@
+/build/
+/out/
+*.pcap
+crash-*
+leak-*
+timeout-*
+.DS_Store
+compile_commands.json
+.cache/
+.dev-image-stamp
