@@ -18,6 +18,15 @@ TEST(Seq, ComparisonsWrap) {
     EXPECT_TRUE(seq_lt(0, 0x7fffffffU));
 }
 
+// Found by fuzz_stack under UBSan: an empty span may carry a null data(), and memcpy from null is
+// undefined behaviour even for zero bytes.
+TEST(ByteRing, EmptySpansAreNoOps) {
+    ByteRing r(8);
+    EXPECT_EQ(r.push(Bytes{}), 0u);
+    r.copy_out(0, MutBytes{});
+    EXPECT_EQ(r.size(), 0u);
+}
+
 TEST(ByteRing, WrapsAround) {
     ByteRing r(8);
     EXPECT_EQ(r.push(buf("abcdef")), 6u);

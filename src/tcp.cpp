@@ -28,6 +28,7 @@ std::string_view to_string(TcpState s) {
 
 std::size_t ByteRing::push(Bytes data) {
     std::size_t n = std::min(data.size(), space());
+    if (n == 0) return 0;  // an empty span may have a null data(): memcpy from null is UB even for 0 bytes
     std::size_t tail = (head_ + size_) % buf_.size();
     std::size_t first = std::min(n, buf_.size() - tail);
     std::memcpy(buf_.data() + tail, data.data(), first);
@@ -37,6 +38,7 @@ std::size_t ByteRing::push(Bytes data) {
 }
 
 void ByteRing::copy_out(std::size_t offset, MutBytes dst) const {
+    if (dst.empty()) return;
     std::size_t start = (head_ + offset) % buf_.size();
     std::size_t first = std::min(dst.size(), buf_.size() - start);
     std::memcpy(dst.data(), buf_.data() + start, first);
