@@ -14,14 +14,15 @@ code.**
 | Path | What lives there |
 |------|------------------|
 | `include/tundra/bytes.hpp`, `checksum.hpp` | big-endian loads and stores; the internet checksum (four variants) |
-| `include/tundra/wire/` | header structs: parse and serialize, `std::expected` errors |
+| `include/tundra/wire.hpp` | header structs: parse and serialize, `std::expected` errors |
 | `include/tundra/clock.hpp`, `timers.hpp` | injected clock (real or virtual), timer queue |
-| `include/tundra/tcp/` | sequence arithmetic, connection state machine, congestion control |
-| `include/tundra/stack.hpp` | the stack: ARP, IPv4, ICMP, UDP, TCP demultiplexing |
-| `src/dev/` | TAP/TUN (Linux), the simulated link, the pcap writer |
-| `apps/` | `tundra`: echo, discard, HTTP and bulk services on a TAP device |
-| `tests/`, `fuzz/`, `bench/` | GoogleTest, libFuzzer, Google Benchmark |
-| `scripts/` | `dev.sh` (run anything in the toolchain container), `integration.sh` |
+| `include/tundra/tcp.hpp`, `src/tcp.cpp` | sequence arithmetic, the connection state machine, congestion control |
+| `include/tundra/stack.hpp`, `src/stack.cpp` | the stack: ARP, IPv4, ICMP, UDP, TCP demultiplexing |
+| `include/tundra/sim.hpp`, `pcap.hpp`, `sha256.hpp` | the simulated link, the pcap writer, SHA-256 |
+| `include/tundra/linux.hpp`, `src/dev/linux.cpp` | TAP/TUN device and the epoll + timerfd event loop (Linux only) |
+| `apps/tundra.cpp` | the app: echo, discard, UDP echo, HTTP with SHA-256 checks |
+| `tests/`, `fuzz/`, `bench/` | GoogleTest, libFuzzer (`fuzz_parsers`, `fuzz_stack`), benchmarks and the NEON study |
+| `scripts/` | `dev.sh` (the container), `integration.sh`, `fuzz.sh`, `bench.sh` |
 
 ## Commands (all inside the container via `scripts/dev.sh`)
 
@@ -29,7 +30,7 @@ code.**
 scripts/dev.sh cmake --preset debug && scripts/dev.sh cmake --build --preset debug
 scripts/dev.sh ctest --preset debug             # unit + scripted TCP + simulation tests
 scripts/dev.sh ctest --preset asan              # the same under ASan + UBSan (clang)
-scripts/dev.sh scripts/fuzz.sh 60               # each fuzzer for 60 s
+scripts/dev.sh scripts/fuzz.sh 60               # both fuzzers for 60 s, in parallel
 scripts/dev.sh scripts/bench.sh                 # checksum and stack benchmarks
 scripts/integration.sh                          # privileged container: TAP + ping/curl/netem against Linux
 ```

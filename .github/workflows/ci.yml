@@ -1,0 +1,29 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        preset: [debug, clang, asan]
+    steps:
+      - uses: actions/checkout@v4
+      - run: scripts/dev.sh cmake --preset ${{ matrix.preset }}
+      - run: scripts/dev.sh cmake --build --preset ${{ matrix.preset }}
+      - run: scripts/dev.sh ctest --preset ${{ matrix.preset }}
+
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: scripts/dev.sh scripts/fuzz.sh 60
+
+  interop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: scripts/integration.sh
