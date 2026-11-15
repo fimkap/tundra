@@ -91,15 +91,29 @@ std::uint16_t sum_simd(Bytes d) {
     const std::byte* p = d.data();
     std::size_t n = d.size();
     std::uint64_t total = 0;
-    while (n >= 16) {
-        // vpadalq_u16 adds pairs of 16-bit lanes into 32-bit lanes; flush to 64 bits before they can overflow.
-        uint32x4_t acc = vdupq_n_u32(0);
-        std::size_t blocks = std::min<std::size_t>(n / 16, 16384);
-        for (std::size_t i = 0; i < blocks; ++i, p += 16) {
-            acc = vpadalq_u16(acc, vreinterpretq_u16_u8(vld1q_u8(reinterpret_cast<const std::uint8_t*>(p))));
+    while (n >= 32) {
+        // Widening adds (UADDW) into four independent 32-bit accumulators. Two lessons from measuring
+        // (bench/neon_study.cpp): one accumulator is latency-bound (each add waits for the last), and the
+        // pairwise form (UADALP) with several accumulators ran 9x slower under GCC 14 than under Clang 19.
+        // This form runs at about 49 GB/s under both. Each 32-bit lane gets one 16-bit value per
+        // iteration, so flush to 64 bits every 32768 iterations, well before a lane can overflow.
+        uint32x4_t a0 = vdupq_n_u32(0), a1 = a0, a2 = a0, a3 = a0;
+        std::size_t blocks = std::min<std::size_t>(n / 32, 32768);
+        const auto* q = reinterpret_cast<const std::uint8_t*>(p);
+        // Indexed from two bases on purpose: written as one pointer bumped by 32, GCC fuses the two loads
+        // into one LDP of a register pair, and in our measurements that loop ran 7x slower (7 GB/s).
+        const std::uint8_t* q2 = q + 16;
+        for (std::size_t i = 0; i < blocks * 32; i += 32) {
+            uint16x8_t x = vreinterpretq_u16_u8(vld1q_u8(q + i));
+            uint16x8_t y = vreinterpretq_u16_u8(vld1q_u8(q2 + i));
+            a0 = vaddw_u16(a0, vget_low_u16(x));
+            a1 = vaddw_high_u16(a1, x);
+            a2 = vaddw_u16(a2, vget_low_u16(y));
+            a3 = vaddw_high_u16(a3, y);
         }
-        n -= blocks * 16;
-        total += vaddlvq_u32(acc);
+        p += blocks * 32;
+        n -= blocks * 32;
+        total += vaddlvq_u32(a0) + vaddlvq_u32(a1) + vaddlvq_u32(a2) + vaddlvq_u32(a3);
     }
     for (; n >= 4; n -= 4, p += 4) {
         std::uint32_t w;
