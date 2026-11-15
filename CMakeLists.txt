@@ -18,6 +18,11 @@ endif()
 
 add_library(tundra STATIC
   src/checksum.cpp
+  src/pcap.cpp
+  src/sim.cpp
+  src/stack.cpp
+  src/tcp.cpp
+  src/timers.cpp
   src/wire.cpp
 )
 target_include_directories(tundra PUBLIC include)
@@ -32,6 +37,9 @@ if(TUNDRA_BUILD_TESTS)
   enable_testing()
   add_executable(tundra_tests
     tests/checksum_test.cpp
+    tests/stack_test.cpp
+    tests/tcp_test.cpp
+    tests/timers_test.cpp
     tests/wire_test.cpp
   )
   target_link_libraries(tundra_tests PRIVATE tundra GTest::gtest_main)
