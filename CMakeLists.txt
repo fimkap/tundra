@@ -19,6 +19,7 @@ endif()
 add_library(tundra STATIC
   src/checksum.cpp
   src/pcap.cpp
+  src/sha256.cpp
   src/sim.cpp
   src/stack.cpp
   src/tcp.cpp
@@ -26,6 +27,14 @@ add_library(tundra STATIC
   src/wire.cpp
 )
 target_include_directories(tundra PUBLIC include)
+
+# The TAP/TUN device, the event loop and the app need Linux; the rest of the stack is portable.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  target_sources(tundra PRIVATE src/dev/linux.cpp)
+  add_executable(tundra-app apps/tundra.cpp)
+  set_target_properties(tundra-app PROPERTIES OUTPUT_NAME tundra)
+  target_link_libraries(tundra-app PRIVATE tundra)
+endif()
 
 include(FetchContent)
 
@@ -37,6 +46,7 @@ if(TUNDRA_BUILD_TESTS)
   enable_testing()
   add_executable(tundra_tests
     tests/checksum_test.cpp
+    tests/sha256_test.cpp
     tests/stack_test.cpp
     tests/sim_property_test.cpp
     tests/tcp_test.cpp
