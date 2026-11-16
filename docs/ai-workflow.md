@@ -66,5 +66,5 @@ Numbers in the README come only from the saved script output in [`docs/results/`
 - **The problem, the constraints, and what is out of scope:** SACK, timestamps and IPv6, stated in the spec.
 - **Whether a result means what it seems to.** The NEON slowdown first looked like a dependency-chain problem
   and turned out to be the load instruction.
-- **The review.** I check the code against the spec and the RFCs, and what I can explain line by line is the
-  measure of what I present.
+- **The review.** Checking the code against the spec and the RFCs is my job, and what I can explain line by
+  line is the measure of what I present.
