@@ -181,8 +181,9 @@ What the checks caught:
 ## How it was built
 
 I chose the problem, a user-space TCP/IP stack for low-level and networking roles, and the constraints:
-tested against Linux, measured, and built in Docker. Claude Code drafted the spec and wrote the code in
-steps. [docs/ai-workflow.md](docs/ai-workflow.md) shows what kept that work checkable:
+tested against Linux, measured, and built in Docker. The spec in [docs/design.md](docs/design.md) came
+first, and Claude Code then wrote the code against it in small steps.
+[docs/ai-workflow.md](docs/ai-workflow.md) shows what kept that work checkable:
 
 - the invariants in [AGENTS.md](AGENTS.md);
 - the guardrails in [.claude/](.claude);

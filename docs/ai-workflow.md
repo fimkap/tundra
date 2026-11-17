@@ -1,9 +1,9 @@
 # How tundra was built with an AI agent
 
 I chose the problem: a user-space TCP/IP stack, to show low-level C++ and networking. I also set the
-constraints: interoperate with Linux, measure the trade-offs, build everything in Docker. Claude Code
-drafted the spec and wrote the code in small steps. This page describes what kept that work checkable,
-and what the checks caught.
+constraints: interoperate with Linux, measure the trade-offs, build everything in Docker. The spec in
+[`design.md`](design.md) came first, and Claude Code then wrote the code against it in small steps. This
+page describes what kept that work checkable, and what the checks caught.
 
 ## Context first
 
